@@ -1,9 +1,10 @@
 """
-Bootstrap IAM for Terraform.
+Bootstrap IAM and S3 state bucket for Terraform.
 
 Step 1: Creates a 'deployer' IAM user with ONLY sts:AssumeRole permission.
 Step 2: Creates per-environment roles that the deployer user can assume:
   - terraform-{env}  -- Used by Terragrunt/Terraform to manage infrastructure
+Step 3: Creates the S3 bucket used by Terragrunt to store remote state.
 
 Note: CI/CD auth (Woodpecker) and app auth use EC2 instance profiles created
 by Terraform, not this script.
@@ -11,14 +12,16 @@ by Terraform, not this script.
 Usage:
   cd scripts/
 
-  # First time: create the deployer user (run once per AWS account)
+  # First time (run once per AWS account, as root):
   uv run bootstrap_iam.py create-user
+  uv run bootstrap_iam.py create-state-bucket --env dev
 
   # Then: create roles for an environment
   uv run bootstrap_iam.py create-roles --env dev
 
   # Tear down
   uv run bootstrap_iam.py destroy-roles --env dev
+  uv run bootstrap_iam.py destroy-state-bucket --env dev
   uv run bootstrap_iam.py destroy-user
 """
 
@@ -356,6 +359,115 @@ def cmd_destroy_roles(iam_client, env: str):
 
 
 # ---------------------------------------------------------------------------
+# State bucket
+# ---------------------------------------------------------------------------
+
+
+def state_bucket_name(account_id: str, env: str) -> str:
+    return f"tf-state-{account_id}-{env}"
+
+
+def cmd_create_state_bucket(s3_client, sts_client, env: str):
+    """Create the S3 bucket used by Terragrunt for remote state."""
+    account_id = get_caller_identity(sts_client)["account_id"]
+    bucket = state_bucket_name(account_id, env)
+    region = s3_client.meta.region_name
+
+    print(f"\n--- Creating Terraform state bucket ---\n")
+    print(f"  Bucket: {bucket}")
+    print(f"  Region: {region}\n")
+
+    try:
+        if region == "us-east-1":
+            s3_client.create_bucket(Bucket=bucket)
+        else:
+            s3_client.create_bucket(
+                Bucket=bucket,
+                CreateBucketConfiguration={"LocationConstraint": region},
+            )
+        print(f"  Bucket '{bucket}' created.")
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+            print(f"  Bucket '{bucket}' already exists.")
+        else:
+            raise
+
+    print("  Enabling versioning...")
+    s3_client.put_bucket_versioning(
+        Bucket=bucket,
+        VersioningConfiguration={"Status": "Enabled"},
+    )
+
+    print("  Blocking all public access...")
+    s3_client.put_public_access_block(
+        Bucket=bucket,
+        PublicAccessBlockConfiguration={
+            "BlockPublicAcls": True,
+            "IgnorePublicAcls": True,
+            "BlockPublicPolicy": True,
+            "RestrictPublicBuckets": True,
+        },
+    )
+
+    print("  Enabling server-side encryption (SSE-S3)...")
+    s3_client.put_bucket_encryption(
+        Bucket=bucket,
+        ServerSideEncryptionConfiguration={
+            "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]
+        },
+    )
+
+    print(f"""
+--- Done! ---
+
+State bucket ready: {bucket}
+
+Update root.hcl with this bucket name:
+
+  remote_state {{
+    backend = "s3"
+    config = {{
+      bucket = "{bucket}"
+      key    = "${{path_relative_to_include()}}/terraform.tfstate"
+      region = "{region}"
+      ...
+    }}
+  }}
+""")
+
+
+def cmd_destroy_state_bucket(s3_client, sts_client, env: str):
+    """Delete the Terraform state bucket (empties all versions first)."""
+    account_id = get_caller_identity(sts_client)["account_id"]
+    bucket = state_bucket_name(account_id, env)
+
+    print(f"\n--- Destroying Terraform state bucket: {bucket} ---\n")
+
+    try:
+        s3_client.head_bucket(Bucket=bucket)
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("404", "NoSuchBucket"):
+            print(f"  Bucket '{bucket}' does not exist, skipping.")
+            return
+        raise
+
+    # Delete all object versions (required before bucket deletion)
+    print("  Deleting all object versions...")
+    paginator = s3_client.get_paginator("list_object_versions")
+    for page in paginator.paginate(Bucket=bucket):
+        objects = [
+            {"Key": v["Key"], "VersionId": v["VersionId"]}
+            for v in page.get("Versions", []) + page.get("DeleteMarkers", [])
+        ]
+        if objects:
+            s3_client.delete_objects(Bucket=bucket, Delete={"Objects": objects})
+
+    print(f"  Deleting bucket '{bucket}'...")
+    s3_client.delete_bucket(Bucket=bucket)
+    print("\nDone. State bucket destroyed.")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -374,20 +486,26 @@ commands:
     )
     parser.add_argument(
         "command",
-        choices=["create-user", "destroy-user", "create-roles", "destroy-roles"],
+        choices=[
+            "create-user", "destroy-user",
+            "create-roles", "destroy-roles",
+            "create-state-bucket", "destroy-state-bucket",
+        ],
         help="Action to perform",
     )
-    parser.add_argument("--env", help="Environment name (required for *-roles commands)")
+    parser.add_argument("--env", help="Environment name (required for *-roles and *-state-bucket commands)")
     parser.add_argument("--profile", default=None, help="AWS CLI profile to use")
     parser.add_argument("--region", default="eu-central-1", help="AWS region")
     args = parser.parse_args()
 
-    if args.command in ("create-roles", "destroy-roles") and not args.env:
+    env_required = ("create-roles", "destroy-roles", "create-state-bucket", "destroy-state-bucket")
+    if args.command in env_required and not args.env:
         parser.error(f"--env is required for {args.command}")
 
     session = boto3.Session(profile_name=args.profile, region_name=args.region)
     iam_client = session.client("iam")
     sts_client = session.client("sts")
+    s3_client = session.client("s3")
 
     match args.command:
         case "create-user":
@@ -398,6 +516,10 @@ commands:
             cmd_create_roles(iam_client, sts_client, args.env)
         case "destroy-roles":
             cmd_destroy_roles(iam_client, args.env)
+        case "create-state-bucket":
+            cmd_create_state_bucket(s3_client, sts_client, args.env)
+        case "destroy-state-bucket":
+            cmd_destroy_state_bucket(s3_client, sts_client, args.env)
 
 
 if __name__ == "__main__":
