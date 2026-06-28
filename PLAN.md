@@ -87,8 +87,39 @@ YOU (developer)
 | IAM (CI → AWS) | EC2 instance profile on DevOps cluster nodes | No credentials stored; Woodpecker inherits role automatically |
 | IAM (apps → AWS) | EC2 instance profile on App cluster nodes | ECR pull, Secrets Manager read, SQS, S3 |
 | Secret delivery | External Secrets Operator + AWS Secrets Manager | Apps see plain K8s Secrets; ESO syncs from AWS |
-| Cluster access | AWS SSM Session Manager | No SSH, no open ports, free; port-forward K3s API locally |
+| kubectl access | AWS SSM Session Manager | No SSH, no open ports, free; port-forward K3s API locally |
+| UI access (Woodpecker, ArgoCD, Grafana) | Tailscale on DevOps cluster | Always-on access to private IPs via tailnet; no open ports, free for personal use |
+| Woodpecker auth | GitHub OAuth | Users whitelist via GitHub OAuth app; baked into Woodpecker |
+| ArgoCD auth | GitHub SSO (OIDC) + RBAC | Read-only vs admin roles; no anonymous access |
+| Grafana auth | GitHub OAuth (built-in) | Same pattern; restrict to your GitHub org/users |
 | IaC | Terraform/Terragrunt (OpenTofu) | Multi-module, multi-env, DRY |
+
+## Access & Security
+
+All DevOps tooling runs in private subnets — never exposed to the internet. Access is two-layered:
+
+```
+You (laptop)
+   │  Tailscale (network layer — who can reach the cluster)
+   ▼
+DevOps cluster private IPs
+   ├── Woodpecker CI  → GitHub OAuth      (who can use it)
+   ├── ArgoCD         → GitHub SSO + RBAC (read-only vs admin roles)
+   └── Grafana        → GitHub OAuth      (logs, metrics, dashboards)
+
+kubectl (occasional)
+   │  SSM Session Manager port-forward → K3s API
+   ▼
+App cluster or DevOps cluster
+```
+
+**Why Tailscale for UIs and SSM for kubectl?**
+SSM port-forwarding is fine for occasional terminal commands but clunky for web UIs (need to run a command and keep the tunnel open every session). Tailscale gives always-on access to private IPs — open a browser, done. Both approaches have zero open ports.
+
+**Grafana access** (logs + metrics) follows the same pattern:
+- Tailscale gets you to the cluster network
+- Grafana GitHub OAuth ensures only authorised users can view dashboards, query Loki logs, or explore Prometheus metrics
+- Sensitive data (DB query patterns, error details in logs) stays inside the tailnet
 
 ## Still Undecided
 
@@ -207,9 +238,10 @@ App Cluster pods
 2. **KMS + S3** ✅ done
 3. **ECR** ← next (container registry; needed before any cluster can pull images)
 4. **DevOps cluster** (2 x t3.medium, K3s, SSM agent via user_data, `devops-cluster-{env}` instance profile)
-5. **Woodpecker CI + ArgoCD** (Helm on DevOps cluster)
+5. **Tailscale** (Kubernetes operator on DevOps cluster; join tailnet for UI access)
+6. **Woodpecker CI + ArgoCD** (Helm on DevOps cluster; GitHub OAuth/SSO configured)
 6. **App cluster** (2 x t3.medium, K3s, `app-cluster-{env}` instance profile, registered with ArgoCD)
-7. **External Secrets Operator** (Helm on App cluster; connects to Secrets Manager)
-8. **RDS Aurora + ElastiCache Redis + SQS** (data layer, isolated subnets)
-9. **Loki + Prometheus + Grafana** (Helm on DevOps cluster)
-10. **ALB + DNS** (route internet → App cluster ingress)
+8. **External Secrets Operator** (Helm on App cluster; connects to Secrets Manager)
+9. **RDS Aurora + ElastiCache Redis + SQS** (data layer, isolated subnets)
+10. **Loki + Prometheus + Grafana** (Helm on DevOps cluster; GitHub OAuth on Grafana)
+11. **ALB + DNS** (route internet → App cluster ingress; ACM cert + HTTPS listener)
