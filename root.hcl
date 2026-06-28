@@ -3,7 +3,7 @@
 remote_state {
   backend = "s3"
   config = {
-    bucket         = "my-s3-terraform-terragrunt-state-bucket"
+    bucket         = "my-s3-terraform-terragrunt-state-bucket" # replace after running: uv run bootstrap_iam.py create-state-bucket --env dev
     key            = "${path_relative_to_include()}/terraform.tfstate"
     region         = "eu-central-1"
     encrypt        = true

@@ -82,7 +82,7 @@ AWS_PROFILE=root-bootstrap uv run bootstrap_iam.py create-state-bucket --env dev
 
 `create-user` creates an IAM user called `deployer` with only `sts:AssumeRole` permission and prints access keys. **Save these immediately** — they are only shown once.
 
-`create-state-bucket` creates `tf-state-<account-id>-dev` with versioning, encryption, and public access blocked. It prints the exact bucket name and the `root.hcl` snippet to paste.
+`create-state-bucket` creates `tf-state-<account-id>-dev` with versioning, encryption, and public access blocked. It prints the exact bucket name and the `root.hcl` snippet to paste — **copy that snippet and update `root.hcl` before running any Terragrunt commands**.
 
 ### 7. Delete the root access keys
 
