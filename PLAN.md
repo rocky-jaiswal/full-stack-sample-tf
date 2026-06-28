@@ -123,6 +123,64 @@ YOU (developer)
 
 > NAT Gateway is the surprise cost. Can reduce by using VPC endpoints for ECR/S3 (free tier after initial setup).
 
+## CI Pipeline Stages (Woodpecker)
+
+Each app repo has a `.woodpecker.yml` defining the pipeline. Stages run in order — build/push only happens if all checks and tests pass.
+
+```
+git push
+   │
+   ├── 1. Code checks       lint + format check + type check + security scan
+   │                        (fast, no dependencies, catches issues early)
+   │
+   ├── 2. Unit tests        no external dependencies, pure logic
+   │
+   ├── 3. Integration tests Woodpecker spins up services (Postgres, Redis)
+   │                        alongside the pipeline — tests connect to them
+   │                        as if they were real. No mocking.
+   │
+   ├── 4. docker build      builds the production image
+   │
+   ├── 5. Push → ECR        tags with git SHA, pushes to registry
+   │
+   └── 6. Update Helm       commits new image tag into values.yaml
+                            ArgoCD picks it up and deploys
+```
+
+**Woodpecker services** — declared in `.woodpecker.yml`, run as Docker containers alongside pipeline steps:
+
+```yaml
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: testdb
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+  redis:
+    image: redis:7
+
+steps:
+  - name: integration-tests
+    image: python:3.14        # or node, go, etc.
+    environment:
+      DATABASE_URL: postgres://test:test@postgres:5432/testdb
+      REDIS_URL: redis://redis:6379
+    commands:
+      - pytest tests/integration
+```
+
+Tests talk to real Postgres and Redis — no mocks, no test doubles for the DB layer. This catches the class of bugs that mocked tests miss.
+
+**Code checks (step 1) — language dependent, but typically:**
+
+| Check | What it catches |
+|-------|----------------|
+| Linter (ruff, eslint, etc.) | Style issues, obvious bugs |
+| Formatter check (black, prettier) | Inconsistent formatting — fails if unformatted |
+| Type checker (mypy, tsc) | Type errors caught before runtime |
+| Security scan (trivy, bandit) | Known CVEs in dependencies, insecure patterns |
+
 ## Observability — How It Fits Together
 
 ```
