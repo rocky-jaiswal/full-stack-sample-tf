@@ -6,34 +6,23 @@ Project for DevOps for any Full Stack Project
 - Multi module
 - Multi environment project
 
-## What I want
+## What we want
 
-- AWS IAM Roles (creation, can be through Python script)
-- Role can only do STS
-- First - Create role which can do - create custom role
-- Then - Create roles for TF / CI-CD
-- Allow assumption of TF roles via STS only
-- Allow assumption of CI-CD role via STS only
-- VPC (public + private subnet)
-- EKS
-- Private Subnet
-  - Servers
-  - Auto Scaled
-  - K3s containers cluster
-- AWS Secret Manager - CMK -> Create Key for data encryption
-- RDS (Aurora Cluster)
-- S3
-- SQS
-- Redis (or AWS Redis flavor)
-- Bastion server in public subnet (protect by TailScale?)
-- Logging from container (Loki, OpenSearch dashboard [should be protected])
-- Metrics (Opentelemetry) -> How to setup & view metrics
-- Protect public subnet?
-- Lambdas in private subnet (background jobs)
-- How to setup apps (web in public subnet, applications / APIs in private subnet)
-- CI / CD with Jenkins / Argo?
-- ECR Registry setup?
-- Helm?
+- AWS IAM Roles (bootstrap via Python/Boto3 script) — STS-only, no long-lived infra keys
+- VPC — 3-tier (public / private / isolated) across 2 AZs
+- Two K3s clusters (hub-spoke): DevOps cluster + App cluster
+- KMS CMK per environment — encrypts S3, RDS, Secrets Manager
+- RDS Aurora (PostgreSQL) — isolated subnet
+- ElastiCache Redis — cache + sessions, isolated subnet
+- SQS (or donkeyq on Redis) — async job queues
+- ECR — private container registry
+- Woodpecker CI — builds images, pushes to ECR
+- ArgoCD — GitOps CD, deploys Helm charts from Git to App cluster
+- Helm — standard packaging for all apps/services
+- AWS Secrets Manager + External Secrets Operator — secrets delivered as K8s Secrets
+- SSM Session Manager — cluster access, no bastion, no open ports
+- Loki + Prometheus + Grafana — observability on DevOps cluster
+- ALB — routes internet traffic into App cluster ingress
 
 ## Terragrunt Usage
 
@@ -79,7 +68,6 @@ AWS_PROFILE=tf-dev terragrunt plan --all --queue-include-dir=kms --queue-include
 | ----------------- | -------- | ---------------------------------------------------------------------------- |
 | `deployer`        | IAM User | Only permission: `sts:AssumeRole`. Source identity for all role assumptions. |
 | `terraform-{env}` | IAM Role | PowerUserAccess + IAM management (inline). Used by Terragrunt.               |
-| `cicd-{env}`      | IAM Role | ECR push, Secrets read, S3 artifacts (inline). Used by CI/CD pipelines.      |
 
 **How role assumption actually works (the "double handshake"):**
 
@@ -128,16 +116,11 @@ uv run bootstrap_iam.py destroy-user
 role_arn = arn:aws:iam::<ACCOUNT_ID>:role/terraform-dev
 source_profile = deployer
 region = eu-central-1
-
-[profile cicd-dev]
-role_arn = arn:aws:iam::<ACCOUNT_ID>:role/cicd-dev
-source_profile = deployer
-region = eu-central-1
 ```
 
 **Then use with Terragrunt:** `AWS_PROFILE=tf-dev terragrunt plan`
 
-**CI/CD auth:** Not decided yet. Trust policy currently allows the deployer user. Will add GitHub OIDC or Jenkins instance profile trust later.
+**CI/CD auth:** Woodpecker CI runs on the DevOps cluster EC2 nodes. Those nodes carry a dedicated IAM instance profile (`devops-cluster-{env}`) with ECR push + S3 artifact permissions. No credentials stored anywhere — the AWS SDK on the node picks up the instance profile automatically. The old `cicd-{env}` role (assumed via deployer) is retired.
 
 **Multi-environment:** Single AWS account for now, environments separated by role names (`terraform-dev`, `terraform-prod`). Designed so it's easy to split into separate accounts later.
 
@@ -164,47 +147,107 @@ region = eu-central-1
 
 **Why bucket policy enforcement?** The default encryption config handles _most_ uploads, but a bucket policy with `DenyUnencryptedUploads` + `DenyInsecureTransport` catches edge cases and satisfies security audits.
 
-### 3. Compute & CI/CD (EKS + CodeBuild + ArgoCD)
+### 3. Access & Secret Management
 
-**Decision:** EKS (managed Kubernetes) instead of K3s. AWS CodeBuild for CI (build & push images). Managed ArgoCD (EKS Capability) for CD (GitOps deployment).
+**Four distinct access problems and how each is solved:**
 
-**Why EKS over K3s?** K3s is free but you self-manage everything — upgrades, patching, HA, networking plugins. EKS costs ~$73/month for the control plane but gives you managed Kubernetes with AWS-native integrations (IAM, ALB, EBS, Secrets Manager). For a production-realistic boilerplate, EKS is what you'd actually use at a company.
+#### Problem 1: You (locally) → AWS to run Terraform
+Already solved. `deployer` user → `sts:AssumeRole` → `terraform-{env}` role. No changes.
+
+#### Problem 2: Woodpecker CI → AWS (push to ECR, read/write S3)
+**Decision:** EC2 Instance Profile on DevOps cluster nodes (`devops-cluster-{env}` role).
+
+Woodpecker runs as a pod on the DevOps cluster EC2 nodes. The instance profile is attached to the node — the AWS SDK picks it up automatically. No credentials stored, nothing to rotate.
+
+Permissions on `devops-cluster-{env}`:
+- ECR: push images, create repositories
+- S3: read/write build artifacts
+- Secrets Manager: read (for pipeline secrets)
+
+#### Problem 3: Apps → AWS services (DB credentials, API keys, SQS, S3)
+**Decision:** External Secrets Operator (ESO) + AWS Secrets Manager.
+
+ESO runs as a pod on the App cluster. It reads secrets from Secrets Manager and creates standard K8s Secrets. Your app pods just mount a K8s Secret — they never talk to AWS directly.
+
+```
+AWS Secrets Manager  →  ESO (pod on App cluster)  →  K8s Secret  →  your app pod (env var)
+```
+
+App cluster nodes carry an instance profile (`app-cluster-{env}`) with:
+- Secrets Manager: read
+- ECR: pull images (read-only)
+- SQS: send/receive messages
+- S3: scoped read/write for app data
+
+#### Problem 4: You → kubectl against both clusters
+**Decision:** AWS SSM Session Manager. No SSH, no open ports, no bastion server.
+
+SSM agent installed on EC2 nodes via Terraform `user_data`. To access kubectl locally:
+
+```bash
+# Port-forward K3s API through SSM tunnel
+aws ssm start-session --target i-<node-id> \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["6443"],"localPortNumber":["6443"]}'
+
+# Then in another terminal
+kubectl --server=https://localhost:6443 get pods
+```
+
+Free, AWS-native, satisfies security requirements (no inbound ports open anywhere).
+
+**Full IAM role summary:**
+
+| Role / Identity | Used by | Key permissions |
+|----------------|---------|----------------|
+| `deployer` IAM user | You, locally | `sts:AssumeRole` only |
+| `terraform-{env}` role | Terragrunt (via deployer) | PowerUser + scoped IAM |
+| `devops-cluster-{env}` instance profile | DevOps cluster EC2 nodes | ECR push, S3 artifacts |
+| `app-cluster-{env}` instance profile | App cluster EC2 nodes | ECR pull, Secrets Manager read, SQS, S3 |
+
+---
+
+### 4. Compute & CI/CD (K3s + Woodpecker CI + ArgoCD)
+
+**Decision:** K3s on t3.medium EC2 instances (private subnets), hub-spoke: separate DevOps cluster and App cluster. Woodpecker CI for CI pipelines. Self-hosted ArgoCD on K3s for CD/GitOps. Apps packaged as Helm charts.
+
+**Why K3s over EKS?** EKS charges ~$73/month just for the control plane, before a single node runs. K3s is a lightweight, fully conformant Kubernetes distribution that runs on regular EC2 instances at no additional cost. Two clusters of 2 x `t3.medium` (~$30/mo each) = ~$120/month total for both clusters — still cheaper than EKS control plane + nodes. Trade-off: you manage K3s upgrades yourself.
+
+**Why Woodpecker CI?** Open-source, self-hosted on K3s, runs pipelines defined in `.woodpecker.yml` alongside your code. Native GitHub/Gitea webhooks, Docker-in-Docker builds, no per-minute billing. Runs as a pod on your cluster — no external service to pay for.
 
 **CI/CD pipeline architecture:**
 
 ```
-Code push to Git
+Code push to GitHub
        |
        v
-AWS CodeBuild (CI)                      Managed ArgoCD (CD)
+Woodpecker CI (on K3s)                  ArgoCD (on K3s, CD)
 ──────────────────────                  ──────────────────────
 1. Build Docker image                   1. Watches Git repo continuously
-2. Run tests                            2. Detects manifest changes
-3. Push image to ECR                    3. Syncs cluster to match Git
-4. Update K8s manifests in Git          4. Self-heals if cluster drifts
-──────────────────────                  ──────────────────────
-  Pay per build-minute                    ~$20/mo + $1/app/mo
+2. Run tests                            2. Detects Helm chart/values change
+3. Push image to ECR                    3. helm upgrade on K3s cluster
+4. Update image tag in                  4. Self-heals if cluster drifts
+   Helm values.yaml (Git commit)        ──────────────────────
+──────────────────────                    Free (runs on your cluster)
+  Free (runs on your cluster)
 ```
 
-**Why CodeBuild?** AWS-native, no infrastructure to manage, IAM role-based auth to ECR (no stored secrets), pay only when builds run. Natural fit since we're already all-in on AWS.
+**Why ArgoCD for CD?** ArgoCD provides continuous GitOps reconciliation — it doesn't just deploy once, it _continuously_ compares the cluster state to Git and self-heals drift. If someone runs a manual `kubectl edit`, ArgoCD detects and reverts it. Git is always the source of truth. Self-hosted on K3s means no add-on fees.
 
-**Why managed ArgoCD (EKS Capability)?** Runs in the AWS control plane — not on our worker nodes. AWS handles scaling, upgrades, and HA. Native integration with ECR, Secrets Manager, and AWS Identity Center for SSO. Supports multi-cluster hub-and-spoke without VPC peering. See [AWS deep dive blog post](https://aws.amazon.com/blogs/containers/deep-dive-streamlining-gitops-with-amazon-eks-capability-for-argo-cd/).
+**Why Helm charts for apps?** Helm is the standard way to package Kubernetes applications — templated YAML with environment-specific values files. ArgoCD natively understands Helm: point it at a chart + a `values.yaml`, and it handles `helm upgrade --install` on every sync.
 
-**Why ArgoCD at all (vs just CodeBuild deploying directly)?** ArgoCD provides continuous GitOps reconciliation — it doesn't just deploy once, it _continuously_ compares the cluster to Git and self-heals drift. If someone runs a manual `kubectl edit` or a pod config changes, ArgoCD detects the difference and reverts it. Git stays the single source of truth at all times, not just at deploy time.
+**Estimated monthly cost (cluster compute only):**
 
-**Estimated monthly cost:**
+| Component | Cost |
+|-----------|------|
+| DevOps cluster: 2 x t3.medium | ~$60 |
+| App cluster: 2 x t3.medium | ~$60 |
+| Woodpecker CI + ArgoCD + PLG | $0 (runs on your nodes) |
+| **Cluster total** | **~$120/mo** |
 
-| Component                | Cost                                                  |
-| ------------------------ | ----------------------------------------------------- |
-| EKS control plane        | ~$73                                                  |
-| ArgoCD capability (base) | ~$20                                                  |
-| ArgoCD per application   | ~$1/app                                               |
-| CodeBuild                | Pay per build-minute (~$0.005/min for small instance) |
-| **Platform overhead**    | **~$95 + build costs**                                |
+Compare to EKS: ~$73 control plane + node costs — K3s hub-spoke is cheaper and demonstrates a more realistic pattern.
 
-Worker node costs (EC2/Fargate) are separate and depend on workload.
-
-### 4. VPC (Networking)
+### 5. VPC (Networking)
 
 **Decision:** 3-tier VPC across 2 AZs in eu-central-1. Single NAT Gateway for dev (cost-saving). Based on [Anton Putra's EKS VPC tutorial](https://github.com/antonputra/tutorials/tree/main/lessons/256/1-terraform).
 
@@ -221,7 +264,7 @@ VPC 10.0.0.0/16 (eu-central-1)
 │
 ├── Private subnets (10.0.64.0/19 + 10.0.96.0/19)
 │   ├── Outbound only via NAT Gateway
-│   ├── EKS worker nodes + app pods go here
+│   ├── K3s nodes (DevOps + App clusters) go here
 │   └── Tagged: kubernetes.io/role/internal-elb = 1
 │
 └── Isolated subnets (10.0.128.0/19 + 10.0.160.0/19)
@@ -229,18 +272,17 @@ VPC 10.0.0.0/16 (eu-central-1)
     └── RDS, ElastiCache go here
 ```
 
-**Why 3 tiers (public / private / isolated)?** The tutorial uses this pattern and it's best practice. Private subnets can reach the internet (outbound via NAT) — needed for EKS nodes to pull container images. Isolated subnets have zero internet access — databases don't need it, and removing the path entirely is stronger than just relying on security groups.
+**Why 3 tiers (public / private / isolated)?** Private subnets can reach the internet (outbound via NAT) — needed for K3s nodes to pull container images. Isolated subnets have zero internet access — databases don't need it, and removing the route entirely is stronger than relying on security groups alone.
 
-**Why 2 AZs?** EKS requires subnets in at least 2 AZs. eu-central-1 has 3 AZs, but 2 is enough for dev and keeps costs down (fewer subnets, one NAT). Can expand to 3 for production.
+**Why 2 AZs?** eu-central-1 has 3 AZs, but 2 is enough for dev and keeps costs down (fewer subnets, one NAT). Can expand to 3 for production.
 
 **Why single NAT Gateway?** A NAT Gateway costs ~$32/month + data processing. Production would have one per AZ for high availability, but for dev a single shared NAT is fine. If AZ-a goes down, private subnets in AZ-b lose outbound internet — acceptable for dev.
 
-**Why EKS subnet tags?** The AWS Load Balancer Controller (installed later on EKS) uses these tags to auto-discover where to place load balancers:
+**Why ALB subnet tags?** The AWS Load Balancer Controller uses these tags to auto-discover where to place load balancers:
 - `kubernetes.io/role/elb = 1` → internet-facing ALBs go in public subnets
 - `kubernetes.io/role/internal-elb = 1` → internal ALBs go in private subnets
-- `kubernetes.io/cluster/app-eks-dev = owned` → this cluster owns these subnets
 
-**Why no security groups in the VPC module?** Each downstream module (EKS, RDS, etc.) will create its own security groups. Keeps modules decoupled — the VPC module just provides the network plumbing.
+**Why no security groups in the VPC module?** Each downstream module (K3s, RDS, etc.) will create its own security groups. Keeps modules decoupled — the VPC module just provides the network plumbing.
 
 **CIDR allocation (/19 = 8,190 IPs each):**
 
@@ -260,27 +302,18 @@ VPC 10.0.0.0/16 (eu-central-1)
 
 ## Remaining Decisions (TODO)
 
-### Networking & Compute
-
-- **Bastion** — Tailscale mesh vs AWS SSM Session Manager vs traditional SSH bastion? Tailscale = no open ports. SSM = no keys, AWS-native. SSH bastion = simple but needs hardening.
-
 ### Application Layer
 
-- **App topology** — Everything behind an ALB in private subnets? Or web/frontend in public, APIs in private? ALB-in-public + EKS-in-private is the typical pattern.
-- **ECR** — Container registry. Simple module, no big decisions. Needed before EKS can pull images.
-- **Helm** — For deploying apps onto EKS. Needed once EKS cluster is running.
+- **Ingress controller** — Traefik (ships with K3s, zero config) vs nginx-ingress. Traefik is the default choice unless we hit a limitation.
+- **SQS vs donkeyq** — SQS for async jobs, or donkeyq (Redis Streams-based queue) since we already have ElastiCache. Decide when apps are being built.
 
-### Data
+### Build Order
 
-- **RDS Aurora** — In isolated subnets, encrypted with our CMK. Straightforward.
-- **SQS** — Message queue, private. Straightforward.
-- **Redis (ElastiCache)** — In isolated subnets. Straightforward.
-
-### Observability
-
-- **Logging** — Loki (lightweight, free, runs on EKS) vs OpenSearch (powerful, AWS-managed, expensive). Loki + Grafana is the budget-friendly choice.
-- **Metrics** — OpenTelemetry collector on EKS nodes. Send to where? Prometheus + Grafana on EKS (free) vs CloudWatch (AWS-managed, pay per metric).
-
-### Priority Order
-
-ECR is the next step — simple module, then EKS can follow.
+1. **ECR** ← next
+2. **DevOps cluster** (K3s, 2 x t3.medium, SSM agent via user_data, `devops-cluster-{env}` instance profile)
+3. **Woodpecker CI + ArgoCD** (Helm on DevOps cluster)
+4. **App cluster** (K3s, 2 x t3.medium, `app-cluster-{env}` instance profile, registered with ArgoCD)
+5. **External Secrets Operator** (Helm on App cluster)
+6. **RDS Aurora + ElastiCache Redis + SQS**
+7. **Loki + Prometheus + Grafana** (Helm on DevOps cluster)
+8. **ALB + DNS**

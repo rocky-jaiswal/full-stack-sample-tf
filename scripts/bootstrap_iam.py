@@ -1,10 +1,12 @@
 """
-Bootstrap IAM for Terraform and CI/CD.
+Bootstrap IAM for Terraform.
 
 Step 1: Creates a 'deployer' IAM user with ONLY sts:AssumeRole permission.
 Step 2: Creates per-environment roles that the deployer user can assume:
   - terraform-{env}  -- Used by Terragrunt/Terraform to manage infrastructure
-  - cicd-{env}       -- Used by CI/CD pipelines for deployments
+
+Note: CI/CD auth (Woodpecker) and app auth use EC2 instance profiles created
+by Terraform, not this script.
 
 Usage:
   cd scripts/
@@ -77,46 +79,6 @@ TERRAFORM_IAM_INLINE_POLICY = {
                 "iam:DeleteOpenIDConnectProvider",
                 "iam:GetOpenIDConnectProvider",
                 "iam:TagOpenIDConnectProvider",
-            ],
-            "Resource": "*",
-        },
-    ],
-}
-
-CICD_INLINE_POLICY = {
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Sid": "ECRAccess",
-            "Effect": "Allow",
-            "Action": [
-                "ecr:GetAuthorizationToken",
-                "ecr:BatchCheckLayerAvailability",
-                "ecr:GetDownloadUrlForLayer",
-                "ecr:BatchGetImage",
-                "ecr:PutImage",
-                "ecr:InitiateLayerUpload",
-                "ecr:UploadLayerPart",
-                "ecr:CompleteLayerUpload",
-            ],
-            "Resource": "*",
-        },
-        {
-            "Sid": "SecretsReadOnly",
-            "Effect": "Allow",
-            "Action": [
-                "secretsmanager:GetSecretValue",
-                "secretsmanager:DescribeSecret",
-            ],
-            "Resource": "*",
-        },
-        {
-            "Sid": "S3DeployArtifacts",
-            "Effect": "Allow",
-            "Action": [
-                "s3:GetObject",
-                "s3:PutObject",
-                "s3:ListBucket",
             ],
             "Resource": "*",
         },
@@ -338,7 +300,7 @@ def cmd_destroy_user(iam_client):
 
 
 def cmd_create_roles(iam_client, sts_client, env: str):
-    """Create terraform and cicd roles for the given environment."""
+    """Create the terraform role for the given environment."""
     identity = get_caller_identity(sts_client)
     account_id = identity["account_id"]
     deployer_arn = f"arn:aws:iam::{account_id}:user/{DEPLOYER_USER_NAME}"
@@ -354,7 +316,6 @@ def cmd_create_roles(iam_client, sts_client, env: str):
         raise
 
     tf_role_name = f"terraform-{env}"
-    cicd_role_name = f"cicd-{env}"
 
     print(f"\n--- Creating roles for env: {env} ---")
     print(f"  Account:  {account_id}")
@@ -363,7 +324,7 @@ def cmd_create_roles(iam_client, sts_client, env: str):
 
     trust_policy = build_trust_policy(account_id, deployer_arn)
 
-    print(f"[1/2] Terraform role: {tf_role_name}")
+    print(f"[1/1] Terraform role: {tf_role_name}")
     create_role(
         iam_client,
         role_name=tf_role_name,
@@ -374,24 +335,13 @@ def cmd_create_roles(iam_client, sts_client, env: str):
         env=env,
     )
 
-    print(f"\n[2/2] CI/CD role: {cicd_role_name}")
-    create_role(
-        iam_client,
-        role_name=cicd_role_name,
-        trust_policy=trust_policy,
-        inline_policy_name="cicd-deployment",
-        inline_policy_doc=CICD_INLINE_POLICY,
-        env=env,
-    )
-
     print(f"""
 --- Done! ---
 
-Roles created:
-  {tf_role_name}   -> arn:aws:iam::{account_id}:role/{tf_role_name}
-  {cicd_role_name}  -> arn:aws:iam::{account_id}:role/{cicd_role_name}
+Role created:
+  {tf_role_name} -> arn:aws:iam::{account_id}:role/{tf_role_name}
 
-Both roles trust: {deployer_arn}
+Trusts: {deployer_arn}
 
 Use with Terragrunt:
   AWS_PROFILE=tf-{env} terragrunt plan
@@ -399,10 +349,9 @@ Use with Terragrunt:
 
 
 def cmd_destroy_roles(iam_client, env: str):
-    """Destroy terraform and cicd roles for the given environment."""
+    """Destroy the terraform role for the given environment."""
     print(f"\n--- Destroying roles for env: {env} ---\n")
     destroy_role(iam_client, f"terraform-{env}")
-    destroy_role(iam_client, f"cicd-{env}")
     print("\nDone. Roles destroyed.")
 
 
