@@ -95,7 +95,19 @@ YOU (developer)
 | Decision | Options | Notes |
 |----------|---------|-------|
 | Ingress controller | Traefik (K3s default) vs nginx | Traefik requires no extra install — default unless we hit a limit |
+| ALB → K3s routing | NodePort (simple) vs AWS Load Balancer Controller on K3s (SOTA) | NodePort: ALB target group points to Traefik NodePort on each node. LBC: same controller EKS uses, creates ALBs from Ingress annotations but needs extra IAM. Decide at ALB step. |
 | Queue implementation | SQS vs donkeyq on ElastiCache | Decide when building apps; donkeyq avoids an extra AWS service |
+
+## Known Gaps (address at the relevant build step)
+
+| Gap | Severity | Address at |
+|-----|----------|-----------|
+| **TLS / HTTPS** | Critical | ALB + DNS step — need ACM certificate + HTTPS listener on ALB (port 443), ALB forwards HTTP internally to K3s |
+| **ALB → K3s routing mechanism** | Critical | ALB + DNS step — NodePort vs AWS LBC decision above |
+| **Secret rotation + pod restart** | High | ESO step — install Reloader (watches K8s Secrets, triggers rolling restarts when values change; one Helm install on App cluster) |
+| **Multi-AZ node placement** | High | K3s cluster Terraform — pin one node per AZ via subnet assignment so a single AZ failure doesn't kill the cluster |
+| **Alerting** | Medium | After Grafana is running — configure Grafana alert rules + notification channel (Slack / email) for error rate spikes, pod crashes, high latency |
+| **Woodpecker → GitHub write access** | Medium | Before first CI run — GitHub token with repo write access; stored in Secrets Manager → ESO → K8s Secret → Woodpecker pipeline secret |
 
 ## Estimated Monthly Cost
 
