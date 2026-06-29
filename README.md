@@ -240,16 +240,18 @@ Woodpecker CI (on K3s)                  ArgoCD (on K3s, CD)
 
 | Component | Cost |
 |-----------|------|
-| DevOps cluster: 2 x t3.medium | ~$60 |
-| App cluster: 2 x t3.medium | ~$60 |
+| DevOps cluster: 2 x t4g.small (ARM) | ~$24 |
+| App cluster: 2 x t4g.small (ARM) | ~$24 |
 | Woodpecker CI + ArgoCD + PLG | $0 (runs on your nodes) |
-| **Cluster total** | **~$120/mo** |
+| **Cluster total** | **~$48/mo** |
+
+> t4g.small (2GB RAM, ARM) is the dev choice — cheap but workable with conservative resource requests. Can bump to t3.medium (4GB) if the DevOps stack starts thrashing memory.
 
 Compare to EKS: ~$73 control plane + node costs — K3s hub-spoke is cheaper and demonstrates a more realistic pattern.
 
 ### 5. VPC (Networking)
 
-**Decision:** 3-tier VPC across 2 AZs in eu-central-1. Single NAT Gateway for dev (cost-saving). Based on [Anton Putra's EKS VPC tutorial](https://github.com/antonputra/tutorials/tree/main/lessons/256/1-terraform).
+**Decision:** 3-tier VPC across 2 AZs in eu-central-1. Single NAT instance (t4g.nano, ~$3/mo) instead of NAT Gateway (~$35/mo) for dev cost savings.
 
 **VPC layout (`modules/vpc`):**
 
@@ -258,17 +260,17 @@ VPC 10.0.0.0/16 (eu-central-1)
 │
 ├── Public subnets (10.0.0.0/19 + 10.0.32.0/19)
 │   ├── Internet Gateway → full internet access
-│   ├── NAT Gateway (single, in AZ-a)
+│   ├── NAT instance (t4g.nano AL2023, single, in AZ-a)
 │   ├── ALBs go here
 │   └── Tagged: kubernetes.io/role/elb = 1
 │
 ├── Private subnets (10.0.64.0/19 + 10.0.96.0/19)
-│   ├── Outbound only via NAT Gateway
+│   ├── Outbound only via NAT instance
 │   ├── K3s nodes (DevOps + App clusters) go here
 │   └── Tagged: kubernetes.io/role/internal-elb = 1
 │
 └── Isolated subnets (10.0.128.0/19 + 10.0.160.0/19)
-    ├── NO internet access (no route table)
+    ├── NO internet access (explicit empty route table)
     └── RDS, ElastiCache go here
 ```
 
@@ -276,7 +278,7 @@ VPC 10.0.0.0/16 (eu-central-1)
 
 **Why 2 AZs?** eu-central-1 has 3 AZs, but 2 is enough for dev and keeps costs down (fewer subnets, one NAT). Can expand to 3 for production.
 
-**Why single NAT Gateway?** A NAT Gateway costs ~$32/month + data processing. Production would have one per AZ for high availability, but for dev a single shared NAT is fine. If AZ-a goes down, private subnets in AZ-b lose outbound internet — acceptable for dev.
+**Why NAT instance instead of NAT Gateway?** NAT Gateway costs ~$35/month regardless of traffic. A t4g.nano EC2 instance running Amazon Linux 2023 with iptables masquerading does the same job for ~$3/month. Single point of failure is acceptable for dev. The instance has `source_dest_check = false` (required for packet forwarding) and a security group allowing inbound from the VPC CIDR only.
 
 **Why ALB subnet tags?** The AWS Load Balancer Controller uses these tags to auto-discover where to place load balancers:
 - `kubernetes.io/role/elb = 1` → internet-facing ALBs go in public subnets
@@ -296,7 +298,7 @@ VPC 10.0.0.0/16 (eu-central-1)
 | Isolated AZ-b | 10.0.160.0/19 | eu-central-1b | 8,190 |
 | **Remaining** | 10.0.192.0/18 | — | 16,382 (future use) |
 
-**Cost:** ~$32/month (NAT Gateway) + ~$3.60/month (Elastic IP) + data processing ($0.045/GB through NAT).
+**Cost:** ~$3/month (t4g.nano NAT instance) + data processing ($0.045/GB through NAT).
 
 ---
 
@@ -309,11 +311,14 @@ VPC 10.0.0.0/16 (eu-central-1)
 
 ### Build Order
 
-1. **ECR** ← next
-2. **DevOps cluster** (K3s, 2 x t3.medium, SSM agent via user_data, `devops-cluster-{env}` instance profile)
-3. **Woodpecker CI + ArgoCD** (Helm on DevOps cluster)
-4. **App cluster** (K3s, 2 x t3.medium, `app-cluster-{env}` instance profile, registered with ArgoCD)
-5. **External Secrets Operator** (Helm on App cluster)
-6. **RDS Aurora + ElastiCache Redis + SQS**
-7. **Loki + Prometheus + Grafana** (Helm on DevOps cluster)
-8. **ALB + DNS**
+1. **VPC** ✅ done
+2. **KMS + S3** ✅ done
+3. **ECR** ✅ done
+4. **DevOps cluster** ← next (K3s, 2 nodes, SSM agent via user_data, `devops-cluster-{env}` instance profile)
+5. **Tailscale** (Kubernetes operator on DevOps cluster)
+6. **Woodpecker CI + ArgoCD** (Helm on DevOps cluster)
+7. **App cluster** (K3s, 2 nodes, `app-cluster-{env}` instance profile, registered with ArgoCD)
+8. **External Secrets Operator** (Helm on App cluster)
+9. **RDS Aurora + ElastiCache Redis + SQS**
+10. **Loki + Prometheus + Grafana** (Helm on DevOps cluster)
+11. **ALB + DNS**

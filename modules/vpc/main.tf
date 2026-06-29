@@ -45,7 +45,7 @@ resource "aws_internet_gateway" "main" {
 }
 
 # -----------------------------------------------------------------------------
-# Public Subnets — ALBs, NAT Gateway
+# Public Subnets — ALBs, NAT instance
 # -----------------------------------------------------------------------------
 
 resource "aws_subnet" "public" {
@@ -87,11 +87,45 @@ resource "aws_route_table_association" "public" {
 }
 
 # -----------------------------------------------------------------------------
-# NAT Gateway — single, in first public subnet (cost-saving for dev)
+# NAT Instance — fck-nat on t4g.nano (~$3/mo vs ~$35/mo for NAT Gateway)
+# Single instance in first public subnet; single point of failure is fine for dev.
 # -----------------------------------------------------------------------------
 
-resource "aws_eip" "nat" {
-  domain = "vpc"
+data "aws_ami" "nat" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023*-kernel-*-arm64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+resource "aws_security_group" "nat" {
+  name        = "${var.project_name}-${var.environment}-nat"
+  description = "NAT instance - allow forwarded traffic from private subnets"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "All traffic from within VPC"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   tags = {
     Name        = "${var.project_name}-${var.environment}-nat"
@@ -100,9 +134,23 @@ resource "aws_eip" "nat" {
   }
 }
 
-resource "aws_nat_gateway" "main" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public[0].id
+resource "aws_instance" "nat" {
+  ami                         = data.aws_ami.nat.id
+  instance_type               = "t4g.nano"
+  subnet_id                   = aws_subnet.public[0].id
+  associate_public_ip_address = true
+  source_dest_check           = false
+  vpc_security_group_ids      = [aws_security_group.nat.id]
+
+  user_data = <<-EOF
+    #!/bin/bash
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/90-nat.conf
+    sysctl -p /etc/sysctl.d/90-nat.conf
+    dnf install -y iptables-services
+    systemctl enable --now iptables
+    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+    iptables-save > /etc/sysconfig/iptables
+  EOF
 
   tags = {
     Name        = "${var.project_name}-${var.environment}-nat"
@@ -136,8 +184,8 @@ resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
 
   route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main.id
+    cidr_block           = "0.0.0.0/0"
+    network_interface_id = aws_instance.nat.primary_network_interface_id
   }
 
   tags = {

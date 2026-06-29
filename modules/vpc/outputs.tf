@@ -18,8 +18,8 @@ output "isolated_subnet_ids" {
   value = aws_subnet.isolated[*].id
 }
 
-output "nat_gateway_id" {
-  value = aws_nat_gateway.main.id
+output "nat_instance_id" {
+  value = aws_instance.nat.id
 }
 
 output "internet_gateway_id" {

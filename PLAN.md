@@ -157,16 +157,16 @@ SSM port-forwarding is fine for occasional terminal commands but clunky for web 
 
 | Component | Detail | Cost |
 |-----------|--------|------|
-| DevOps cluster | 2 x t3.medium | ~$60 |
-| App cluster | 2 x t3.medium | ~$60 |
+| DevOps cluster | 2 x t4g.small (ARM) | ~$24 |
+| App cluster | 2 x t4g.small (ARM) | ~$24 |
 | RDS Aurora | Smallest instance | ~$35 |
 | RDS Proxy | Per vCPU of Aurora | ~$15 |
 | ElastiCache Redis | cache.t3.micro | ~$15 |
 | ECR + S3 + KMS | Minimal usage | ~$5 |
-| NAT Gateway | Single (dev) | ~$35 |
-| **Total** | | **~$210/mo** |
+| NAT instance | t4g.nano (replaces NAT GW) | ~$3 |
+| **Total** | | **~$121/mo** |
 
-> NAT Gateway is the surprise cost. Can reduce by using VPC endpoints for ECR/S3 (free tier after initial setup).
+> Down from ~$210/mo — NAT instance saves ~$32/mo, ARM nodes save ~$72/mo vs t3.medium. Can bump nodes to t3.medium if the DevOps stack needs more memory.
 
 ## CI Pipeline Stages (Woodpecker)
 
@@ -248,13 +248,13 @@ App Cluster pods
 
 ## Build Order
 
-1. **VPC** ✅ done
+1. **VPC** ✅ done (NAT instance t4g.nano instead of NAT Gateway — ~$3/mo vs ~$35/mo)
 2. **KMS + S3** ✅ done
-3. **ECR** ← next (container registry; needed before any cluster can pull images)
-4. **DevOps cluster** (2 x t3.medium, K3s, SSM agent via user_data, `devops-cluster-{env}` instance profile)
+3. **ECR** ✅ done (3 repos: api, web, worker; KMS-encrypted; lifecycle policy)
+4. **DevOps cluster** ← next (2 x t4g.small, K3s, SSM agent via user_data, `devops-cluster-{env}` instance profile)
 5. **Tailscale** (Kubernetes operator on DevOps cluster; join tailnet for UI access)
 6. **Woodpecker CI + ArgoCD** (Helm on DevOps cluster; GitHub OAuth/SSO configured)
-7. **App cluster** (2 x t3.medium, K3s, `app-cluster-{env}` instance profile, registered with ArgoCD)
+7. **App cluster** (2 x t4g.small, K3s, `app-cluster-{env}` instance profile, registered with ArgoCD)
 8. **External Secrets Operator** (Helm on App cluster; connects to Secrets Manager)
 9. **RDS Aurora + ElastiCache Redis + SQS** (data layer, isolated subnets)
 10. **Loki + Prometheus + Grafana** (Helm on DevOps cluster; GitHub OAuth on Grafana)
