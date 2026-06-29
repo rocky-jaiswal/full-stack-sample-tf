@@ -1,7 +1,3 @@
-locals {
-  cluster_name = "${var.project_name}-${var.environment}"
-}
-
 # -----------------------------------------------------------------------------
 # VPC
 # -----------------------------------------------------------------------------
@@ -16,6 +12,21 @@ resource "aws_vpc" "main" {
     Name        = "${var.project_name}-${var.environment}"
     Environment = var.environment
     ManagedBy   = "terraform"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = length(var.azs) == length(var.public_subnet_cidrs)
+      error_message = "azs and public_subnet_cidrs must have the same number of entries."
+    }
+    precondition {
+      condition     = length(var.azs) == length(var.private_subnet_cidrs)
+      error_message = "azs and private_subnet_cidrs must have the same number of entries."
+    }
+    precondition {
+      condition     = length(var.azs) == length(var.isolated_subnet_cidrs)
+      error_message = "azs and isolated_subnet_cidrs must have the same number of entries."
+    }
   }
 }
 
@@ -46,11 +57,10 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name                                        = "${var.project_name}-${var.environment}-public-${var.azs[count.index]}"
-    Environment                                 = var.environment
-    ManagedBy                                   = "terraform"
-    "kubernetes.io/role/elb"                    = "1"
-    "kubernetes.io/cluster/${local.cluster_name}" = "owned"
+    Name                     = "${var.project_name}-${var.environment}-public-${var.azs[count.index]}"
+    Environment              = var.environment
+    ManagedBy                = "terraform"
+    "kubernetes.io/role/elb" = "1"
   }
 }
 
@@ -104,7 +114,7 @@ resource "aws_nat_gateway" "main" {
 }
 
 # -----------------------------------------------------------------------------
-# Private Subnets — EKS worker nodes, application pods
+# Private Subnets — K3s cluster nodes (DevOps + App clusters)
 # -----------------------------------------------------------------------------
 
 resource "aws_subnet" "private" {
@@ -115,11 +125,10 @@ resource "aws_subnet" "private" {
   availability_zone = var.azs[count.index]
 
   tags = {
-    Name                                        = "${var.project_name}-${var.environment}-private-${var.azs[count.index]}"
-    Environment                                 = var.environment
-    ManagedBy                                   = "terraform"
-    "kubernetes.io/role/internal-elb"           = "1"
-    "kubernetes.io/cluster/${local.cluster_name}" = "owned"
+    Name                              = "${var.project_name}-${var.environment}-private-${var.azs[count.index]}"
+    Environment                       = var.environment
+    ManagedBy                         = "terraform"
+    "kubernetes.io/role/internal-elb" = "1"
   }
 }
 
@@ -161,4 +170,24 @@ resource "aws_subnet" "isolated" {
     Environment = var.environment
     ManagedBy   = "terraform"
   }
+}
+
+# Explicit route table with no routes — isolated subnets have local-only access.
+# Without this, subnets fall back to the VPC main route table which could be
+# accidentally modified to add external access.
+resource "aws_route_table" "isolated" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name        = "${var.project_name}-${var.environment}-isolated"
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_route_table_association" "isolated" {
+  count = length(var.isolated_subnet_cidrs)
+
+  subnet_id      = aws_subnet.isolated[count.index].id
+  route_table_id = aws_route_table.isolated.id
 }
