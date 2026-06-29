@@ -134,11 +134,11 @@ SSM port-forwarding is fine for occasional terminal commands but clunky for web 
 
 | Gap | Severity | Address at |
 |-----|----------|-----------|
-| **IAM cluster instance profiles** | High | DevOps + App cluster Terraform — two EC2 instance profiles must be created inside the cluster modules: `devops-cluster-{env}` (Woodpecker needs ECR push/pull + S3 read/write) and `app-cluster-{env}` (pods need ECR pull, Secrets Manager read, SQS send/receive, S3 read/write); these are not created by the bootstrap script |
+| **IAM cluster instance profiles** | Resolved | `devops-cluster-{env}` IAM role + instance profile created in `modules/devops-cluster/iam.tf`; `app-cluster-{env}` will be created in the App cluster module |
 | **TLS / HTTPS** | Critical | ALB + DNS step — need ACM certificate + HTTPS listener on ALB (port 443), ALB forwards HTTP internally to K3s |
 | **ALB → K3s routing mechanism** | Critical | ALB + DNS step — NodePort vs AWS LBC decision above |
 | **Secret rotation + pod restart** | High | ESO step — install Reloader (watches K8s Secrets, triggers rolling restarts when values change; one Helm install on App cluster) |
-| **Multi-AZ node placement** | High | K3s cluster Terraform — pin one node per AZ via subnet assignment so a single AZ failure doesn't kill the cluster |
+| **Multi-AZ node placement** | Resolved | DevOps cluster: server in private-AZ-a, agent in private-AZ-b (different subnets, different AZs) — both cluster modules follow this pattern |
 | **DB migrations** | Resolved | App runs migrations on startup before serving traffic. Migrations must be backward-compatible (expand-then-contract) since old + new pods overlap briefly during rolling updates |
 | **Docker build in Woodpecker** | High | Woodpecker setup — Docker-in-Docker (DinD) needs privileged pods (security risk); prefer **Kaniko** which builds images without Docker daemon, no privileged mode needed |
 | **RDS connection pooling** | Resolved | **RDS Proxy** (managed, ~$15/mo) — sits between app pods and Aurora, pools connections, handles failover transparently. Apps connect to the Proxy endpoint instead of Aurora directly |
@@ -150,15 +150,15 @@ SSM port-forwarding is fine for occasional terminal commands but clunky for web 
 | **K3s etcd backup** | Medium | After DevOps cluster is up — back up K3s etcd regularly; ArgoCD app definitions are in Git but cluster state is not |
 | **Alerting** | Medium | After Grafana is running — configure Grafana alert rules + notification channel (Slack / email) for error rate spikes, pod crashes, high latency |
 | **Woodpecker → GitHub write access** | Medium | Before first CI run — GitHub token with repo write access; stored in Secrets Manager → ESO → K8s Secret → Woodpecker pipeline secret |
-| **OS / AMI for K3s nodes** | Low | K3s cluster Terraform — choose Amazon Linux 2023 or Ubuntu 24.04; affects patching strategy and K3s install scripts |
+| **OS / AMI for K3s nodes** | Resolved | Amazon Linux 2023 ARM64 (al2023-ami-2023*-arm64) — K3s installs cleanly via curl installer; AL2023 minimal has no iptables/firewalld (use nftables for NAT) |
 | **Non-root containers** | Low | Helm chart authoring — API pods should run as non-root with read-only filesystems; set in Helm chart `securityContext` |
 
 ## Estimated Monthly Cost
 
 | Component | Detail | Cost |
 |-----------|--------|------|
-| DevOps cluster | 2 x t4g.small (ARM) | ~$24 |
-| App cluster | 2 x t4g.small (ARM) | ~$24 |
+| DevOps cluster | 2 x t4g.medium (ARM) | ~$24 |
+| App cluster | 2 x t4g.medium (ARM) | ~$24 |
 | RDS Aurora | Smallest instance | ~$35 |
 | RDS Proxy | Per vCPU of Aurora | ~$15 |
 | ElastiCache Redis | cache.t3.micro | ~$15 |
@@ -251,10 +251,10 @@ App Cluster pods
 1. **VPC** ✅ done (NAT instance t4g.nano instead of NAT Gateway — ~$3/mo vs ~$35/mo)
 2. **KMS + S3** ✅ done
 3. **ECR** ✅ done (3 repos: api, web, worker; KMS-encrypted; lifecycle policy)
-4. **DevOps cluster** ← next (2 x t4g.small, K3s, SSM agent via user_data, `devops-cluster-{env}` instance profile)
-5. **Tailscale** (Kubernetes operator on DevOps cluster; join tailnet for UI access)
+4. **DevOps cluster** ✅ done (2 x t4g.medium t4g, K3s v1.36.2+k3s1, both nodes Ready, SSM registered)
+5. **Tailscale** ← next (Kubernetes operator on DevOps cluster; join tailnet for UI access)
 6. **Woodpecker CI + ArgoCD** (Helm on DevOps cluster; GitHub OAuth/SSO configured)
-7. **App cluster** (2 x t4g.small, K3s, `app-cluster-{env}` instance profile, registered with ArgoCD)
+7. **App cluster** (2 x t4g.medium, K3s, `app-cluster-{env}` instance profile, registered with ArgoCD)
 8. **External Secrets Operator** (Helm on App cluster; connects to Secrets Manager)
 9. **RDS Aurora + ElastiCache Redis + SQS** (data layer, isolated subnets)
 10. **Loki + Prometheus + Grafana** (Helm on DevOps cluster; GitHub OAuth on Grafana)

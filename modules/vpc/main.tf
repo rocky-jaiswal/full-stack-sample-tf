@@ -141,15 +141,27 @@ resource "aws_instance" "nat" {
   associate_public_ip_address = true
   source_dest_check           = false
   vpc_security_group_ids      = [aws_security_group.nat.id]
+  user_data_replace_on_change = true
 
   user_data = <<-EOF
     #!/bin/bash
+
+    # Enable IP forwarding
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/90-nat.conf
     sysctl -p /etc/sysctl.d/90-nat.conf
-    dnf install -y iptables-services
-    systemctl enable --now iptables
-    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-    iptables-save > /etc/sysconfig/iptables
+
+    # AL2023 minimal has neither iptables nor firewalld; use nftables (kernel-native).
+    # NAT instance is in a public subnet so dnf can reach the internet directly.
+    dnf install -y nftables
+
+    # Add masquerade rule now
+    nft add table ip nat
+    nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat ; }'
+    nft add rule ip nat postrouting masquerade
+
+    # Persist ruleset so nftables service re-applies it on reboot
+    nft list ruleset > /etc/sysconfig/nftables.conf
+    systemctl enable nftables
   EOF
 
   tags = {

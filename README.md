@@ -240,12 +240,12 @@ Woodpecker CI (on K3s)                  ArgoCD (on K3s, CD)
 
 | Component | Cost |
 |-----------|------|
-| DevOps cluster: 2 x t4g.small (ARM) | ~$24 |
-| App cluster: 2 x t4g.small (ARM) | ~$24 |
+| DevOps cluster: 2 x t4g.medium (ARM) | ~$24 |
+| App cluster: 2 x t4g.medium (ARM) | ~$24 |
 | Woodpecker CI + ArgoCD + PLG | $0 (runs on your nodes) |
 | **Cluster total** | **~$48/mo** |
 
-> t4g.small (2GB RAM, ARM) is the dev choice — cheap but workable with conservative resource requests. Can bump to t3.medium (4GB) if the DevOps stack starts thrashing memory.
+> t4g.medium (2GB RAM, ARM) is the dev choice — cheap but workable with conservative resource requests. Can bump to t3.medium (4GB) if the DevOps stack starts thrashing memory.
 
 Compare to EKS: ~$73 control plane + node costs — K3s hub-spoke is cheaper and demonstrates a more realistic pattern.
 
@@ -278,7 +278,7 @@ VPC 10.0.0.0/16 (eu-central-1)
 
 **Why 2 AZs?** eu-central-1 has 3 AZs, but 2 is enough for dev and keeps costs down (fewer subnets, one NAT). Can expand to 3 for production.
 
-**Why NAT instance instead of NAT Gateway?** NAT Gateway costs ~$35/month regardless of traffic. A t4g.nano EC2 instance running Amazon Linux 2023 with iptables masquerading does the same job for ~$3/month. Single point of failure is acceptable for dev. The instance has `source_dest_check = false` (required for packet forwarding) and a security group allowing inbound from the VPC CIDR only.
+**Why NAT instance instead of NAT Gateway?** NAT Gateway costs ~$35/month regardless of traffic. A t4g.nano EC2 instance running Amazon Linux 2023 with nftables masquerade does the same job for ~$3/month. Single point of failure is acceptable for dev. The instance has `source_dest_check = false` (required for packet forwarding) and a security group allowing inbound from the VPC CIDR only. Note: AL2023 minimal AMI ships without `iptables` or `firewalld` — the user_data installs `nftables` via dnf (NAT instance has direct internet access through the IGW).
 
 **Why ALB subnet tags?** The AWS Load Balancer Controller uses these tags to auto-discover where to place load balancers:
 - `kubernetes.io/role/elb = 1` → internet-facing ALBs go in public subnets
@@ -314,8 +314,8 @@ VPC 10.0.0.0/16 (eu-central-1)
 1. **VPC** ✅ done
 2. **KMS + S3** ✅ done
 3. **ECR** ✅ done
-4. **DevOps cluster** ← next (K3s, 2 nodes, SSM agent via user_data, `devops-cluster-{env}` instance profile)
-5. **Tailscale** (Kubernetes operator on DevOps cluster)
+4. **DevOps cluster** ✅ done (K3s v1.36.2+k3s1, 2 x t4g.medium, both nodes Ready, SSM registered)
+5. **Tailscale** ← next (Kubernetes operator on DevOps cluster)
 6. **Woodpecker CI + ArgoCD** (Helm on DevOps cluster)
 7. **App cluster** (K3s, 2 nodes, `app-cluster-{env}` instance profile, registered with ArgoCD)
 8. **External Secrets Operator** (Helm on App cluster)
