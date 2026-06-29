@@ -24,7 +24,7 @@ Top-right corner of the console → your account name → copy the **Account ID*
 
 ## Part 2 — Local machine setup
 
-### 4. Install tools
+### 4. Install tools (can use brew also)
 
 ```bash
 # OpenTofu (open-source Terraform fork)
@@ -72,17 +72,22 @@ aws_secret_access_key = <root secret key from step 2>
 
 ## Part 3 — Bootstrap IAM
 
-### 6. Create the deployer user and state bucket
+### 6. Run all bootstrap commands (while root keys are active)
+
+All three commands require root access. Run them before deleting the root keys.
 
 ```bash
 cd scripts/
 AWS_PROFILE=root-bootstrap uv run bootstrap_iam.py create-user
 AWS_PROFILE=root-bootstrap uv run bootstrap_iam.py create-state-bucket --env dev
+AWS_PROFILE=root-bootstrap uv run bootstrap_iam.py create-roles --env dev
 ```
 
 `create-user` creates an IAM user called `deployer` with only `sts:AssumeRole` permission and prints access keys. **Save these immediately** — they are only shown once.
 
-`create-state-bucket` creates `tf-state-<account-id>-dev` with versioning, encryption, and public access blocked. It prints the exact bucket name and the `root.hcl` snippet to paste — **copy that snippet and update `root.hcl` before running any Terragrunt commands**.
+`create-state-bucket` creates the remote state bucket with versioning, encryption, and public access blocked. It prints the exact bucket name and the `root.hcl` snippet to paste — **copy that snippet and update `root.hcl` before running any Terragrunt commands**.
+
+`create-roles` creates the `terraform-dev` IAM role (PowerUser + IAM permissions) that Terragrunt will assume via `sts:AssumeRole`.
 
 ### 7. Delete the root access keys
 
@@ -90,11 +95,11 @@ Back in the AWS Console:
 
 > IAM → Security credentials → Access keys → **Delete**
 
-Root access keys should not persist. From this point on, everything runs through the `deployer` user.
+Root access keys should not persist. All three bootstrap commands are done — you no longer need them.
 
 ### 8. Configure deployer credentials
 
-Replace the root credentials with the deployer keys:
+Replace the root credentials with the deployer keys printed in step 6:
 
 ```ini
 # ~/.aws/credentials
@@ -111,25 +116,18 @@ source_profile = deployer
 region         = eu-central-1
 ```
 
-### 9. Create the Terraform role
-
-```bash
-cd scripts/
-uv run bootstrap_iam.py create-roles --env dev
-```
-
-This creates the `terraform-dev` IAM role (PowerUser + IAM permissions) that Terragrunt will assume via `sts:AssumeRole`.
-
 ---
 
 ## Part 4 — Verify
 
-### 10. Run a Terragrunt plan
+### 9. Run a Terragrunt plan
 
 ```bash
 cd environments/dev/kms
 AWS_PROFILE=tf-dev terragrunt plan
 ```
+
+> **Note:** Always use `terragrunt plan`, not `tofu plan`. Terragrunt reads `terragrunt.hcl`, configures the remote backend, and then calls `tofu` internally. Running `tofu plan` directly skips all of that and will error.
 
 If it prints a plan without credential errors — everything is wired up correctly.
 
@@ -140,9 +138,9 @@ If it prints a plan without credential errors — everything is wired up correct
 ```bash
 cd scripts/
 
-uv run bootstrap_iam.py destroy-roles --env dev
-uv run bootstrap_iam.py destroy-state-bucket --env dev
-uv run bootstrap_iam.py destroy-user
+AWS_PROFILE=root-bootstrap uv run bootstrap_iam.py destroy-roles --env dev
+AWS_PROFILE=root-bootstrap uv run bootstrap_iam.py destroy-state-bucket --env dev
+AWS_PROFILE=root-bootstrap uv run bootstrap_iam.py destroy-user
 ```
 
 `destroy-state-bucket` deletes all object versions before removing the bucket — S3 will refuse to delete a versioned bucket that still has objects.

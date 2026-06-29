@@ -134,6 +134,7 @@ SSM port-forwarding is fine for occasional terminal commands but clunky for web 
 
 | Gap | Severity | Address at |
 |-----|----------|-----------|
+| **IAM cluster instance profiles** | High | DevOps + App cluster Terraform — two EC2 instance profiles must be created inside the cluster modules: `devops-cluster-{env}` (Woodpecker needs ECR push/pull + S3 read/write) and `app-cluster-{env}` (pods need ECR pull, Secrets Manager read, SQS send/receive, S3 read/write); these are not created by the bootstrap script |
 | **TLS / HTTPS** | Critical | ALB + DNS step — need ACM certificate + HTTPS listener on ALB (port 443), ALB forwards HTTP internally to K3s |
 | **ALB → K3s routing mechanism** | Critical | ALB + DNS step — NodePort vs AWS LBC decision above |
 | **Secret rotation + pod restart** | High | ESO step — install Reloader (watches K8s Secrets, triggers rolling restarts when values change; one Helm install on App cluster) |

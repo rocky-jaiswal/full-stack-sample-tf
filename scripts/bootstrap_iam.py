@@ -26,6 +26,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import sys
 
@@ -364,7 +365,8 @@ def cmd_destroy_roles(iam_client, env: str):
 
 
 def state_bucket_name(account_id: str, env: str) -> str:
-    return f"tf-state-{account_id}-{env}"
+    suffix = hashlib.sha256(account_id.encode()).hexdigest()[:6]
+    return f"tf-state-{account_id}-{env}-{suffix}"
 
 
 def cmd_create_state_bucket(s3_client, sts_client, env: str):
