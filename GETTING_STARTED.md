@@ -48,6 +48,14 @@ chmod +x kubectl && sudo mv kubectl /usr/local/bin/
 
 # Helm (needed later for installing tools onto K3s)
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# AWS Session Manager plugin (required for 'aws ssm start-session')
+# For Fedora/Nobara/RHEL-based systems:
+curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/linux_64bit/session-manager-plugin.rpm" -o /tmp/session-manager-plugin.rpm
+sudo dnf install -y /tmp/session-manager-plugin.rpm
+# For Ubuntu/Debian:
+# curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" -o /tmp/session-manager-plugin.deb
+# sudo dpkg -i /tmp/session-manager-plugin.deb
 ```
 
 Verify:
@@ -150,3 +158,72 @@ AWS_PROFILE=root-bootstrap uv run bootstrap_iam.py destroy-user
 ## What's next
 
 See [PLAN.md](PLAN.md) for the full build order.
+
+---
+
+## Part 5 — Bootstrap DevOps cluster apps
+
+Installs ArgoCD, Woodpecker CI, Loki, and kube-prometheus-stack (Prometheus + Grafana) on the DevOps cluster via Terragrunt (`modules/devops-cluster-apps/`).
+
+### 1. Fetch the kubeconfig (one-time)
+
+```bash
+./scripts/get-kubeconfig.sh dev
+# saves to ~/.kube/devops-cluster-dev
+```
+
+### 2. Start the K3s API tunnel (keep running during apply)
+
+Open a separate terminal and leave it running:
+
+```bash
+./scripts/api-tunnel.sh dev
+# SSM port-forward: localhost:6443 → K3s API
+```
+
+### 3. Create a GitHub OAuth App for Woodpecker
+
+GitHub → Settings → Developer settings → OAuth Apps → **New OAuth App**
+
+- Application name: `Woodpecker CI`
+- Homepage URL: anything for now
+- Authorization callback URL: `http://localhost:8081/authorize`
+
+Save the **Client ID** and generate a **Client Secret**.
+
+### 4. Run Terragrunt apply
+
+> **Fish shell:** use `set -x` — the `KEY=VALUE command` prefix syntax is bash-only.
+
+```fish
+set -x TF_VAR_woodpecker_agent_secret (openssl rand -hex 32)
+set -x TF_VAR_woodpecker_github_client_id <client-id>
+set -x TF_VAR_woodpecker_github_client_secret <client-secret>
+set -x AWS_PROFILE tf-dev
+set -x KUBECONFIG /home/<you>/.kube/devops-cluster-dev
+
+cd environments/dev/devops-cluster-apps
+terragrunt apply
+```
+
+Takes ~10 minutes (ArgoCD and kube-prometheus-stack wait for all pods to be ready).
+
+**Helm chart notes:**
+- Woodpecker chart is OCI-based: `oci://ghcr.io/woodpecker-ci/helm/woodpecker` — the old `https://woodpecker-ci.org/helm` URL is dead.
+- Loki v3+ requires `loki.schemaConfig` in values — already set in `helm-values/loki.yaml`.
+
+### 5. Access the UIs
+
+```bash
+./scripts/tunnel.sh dev
+```
+
+Opens the K3s API tunnel and `kubectl port-forward` for all three services in one command.
+
+| URL | Credentials |
+|-----|-------------|
+| `http://localhost:8080` ArgoCD | `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' \| base64 -d` |
+| `http://localhost:8081` Woodpecker | Log in with GitHub |
+| `http://localhost:8082` Grafana | admin / admin |
+
+> **Future:** Tailscale operator on the DevOps cluster would give always-on access without running `tunnel.sh` each session. Deferred until a custom domain is available for the Woodpecker webhook URL.

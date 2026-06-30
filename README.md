@@ -302,6 +302,30 @@ VPC 10.0.0.0/16 (eu-central-1)
 
 ---
 
+### 6. DevOps Cluster UI Access (SSM tunnel + kubectl port-forward)
+
+**Decision:** SSM port-forward to K3s API (port 6443), then `kubectl port-forward` directly to each service on distinct localhost ports. No `/etc/hosts`, no Traefik hostname routing.
+
+**Pattern:**
+```
+Your laptop
+  │  scripts/tunnel.sh dev
+  │
+  ├── SSM port-forward 6443 → K3s API (background)
+  │
+  ├── kubectl port-forward localhost:8080 → svc/argocd-server (argocd ns)
+  ├── kubectl port-forward localhost:8081 → svc/woodpecker-server (woodpecker ns)
+  └── kubectl port-forward localhost:8082 → svc/kube-prometheus-stack-grafana (monitoring ns)
+```
+
+**Usage:** `./scripts/tunnel.sh dev` — finds the server node by tag, opens everything. All UIs accessible at `http://localhost:<port>` while the script is running.
+
+**Why not Traefik + /etc/hosts?** /etc/hosts is a manual, undocumented step that breaks silently. Direct port-forwards need no hostname routing and work the same way regardless of what ingress controller is installed.
+
+**Future:** Tailscale operator would replace the manual tunnel with always-on access via WireGuard. Deferred until a public domain is available for Woodpecker webhook callbacks.
+
+---
+
 ## Remaining Decisions (TODO)
 
 ### Application Layer
@@ -315,10 +339,8 @@ VPC 10.0.0.0/16 (eu-central-1)
 2. **KMS + S3** ✅ done
 3. **ECR** ✅ done
 4. **DevOps cluster** ✅ done (K3s v1.36.2+k3s1, 2 x t4g.medium, both nodes Ready, SSM registered)
-5. **Tailscale** ← next (Kubernetes operator on DevOps cluster)
-6. **Woodpecker CI + ArgoCD** (Helm on DevOps cluster)
-7. **App cluster** (K3s, 2 nodes, `app-cluster-{env}` instance profile, registered with ArgoCD)
-8. **External Secrets Operator** (Helm on App cluster)
-9. **RDS Aurora + ElastiCache Redis + SQS**
-10. **Loki + Prometheus + Grafana** (Helm on DevOps cluster)
-11. **ALB + DNS**
+5. **Woodpecker CI + ArgoCD + PLG** ✅ done (`modules/devops-cluster-apps/`; UIs via `./scripts/tunnel.sh dev`)
+6. **App cluster** ← next (K3s, 2 nodes, `app-cluster-{env}` instance profile, registered with ArgoCD)
+7. **External Secrets Operator** (Helm on App cluster)
+8. **RDS Aurora + ElastiCache Redis + SQS**
+9. **ALB + DNS**

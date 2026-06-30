@@ -1,0 +1,15 @@
+server:
+  env:
+    WOODPECKER_ADMIN: "rocky-jaiswal"
+    # Update to ALB URL when provisioned — enables GitHub webhook auto-triggers
+    WOODPECKER_HOST: "http://localhost:8081"
+    WOODPECKER_GITHUB: "true"
+    # WOODPECKER_GITHUB_CLIENT, WOODPECKER_GITHUB_SECRET, WOODPECKER_AGENT_SECRET
+    # passed via set_sensitive in main.tf (never in values files)
+
+agent:
+  env:
+    WOODPECKER_BACKEND: "kubernetes"
+    WOODPECKER_BACKEND_K8S_NAMESPACE: "woodpecker"
+    WOODPECKER_BACKEND_K8S_STORAGE_CLASS: "local-path"
+    WOODPECKER_MAX_PROCS: "1"

@@ -1,0 +1,27 @@
+grafana:
+  adminPassword: "admin"  # change before any public exposure
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      url: http://loki.logging:3100
+      access: proxy
+
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+
+alertmanager:
+  enabled: false
+
+nodeExporter:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true

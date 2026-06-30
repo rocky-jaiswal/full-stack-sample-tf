@@ -1,0 +1,3 @@
+configs:
+  params:
+    server.insecure: "true"  # TLS termination handled at ALB when provisioned
