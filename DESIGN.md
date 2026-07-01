@@ -373,7 +373,7 @@ Your laptop
 
 **Why not Traefik + /etc/hosts?** /etc/hosts is a manual, undocumented step that breaks silently. Direct port-forwards need no hostname routing and work the same way regardless of what ingress controller is installed.
 
-**Future:** Tailscale operator would replace the manual tunnel with always-on access via WireGuard. Deferred until a public domain is available for Woodpecker webhook callbacks.
+**Next:** Tailscale operator replaces this manual tunnel pattern with always-on access via WireGuard — decided 2026-07-01 (see PLAN.md Future Enhancements), no longer gated on ALB/a public domain. Free tier covers this project's scale.
 
 ## 7. Observability
 

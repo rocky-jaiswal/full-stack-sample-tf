@@ -72,6 +72,13 @@ YOU (developer)
 
 See [DESIGN.md](DESIGN.md) for decisions already made (topology, CI/CD, IAM, VPC, access patterns) and open design questions.
 
+## Next Session (2026-07-02) — decided, not deferred
+
+The dev env was fully destroyed on 2026-07-01 (intentional, to re-test the build-from-scratch flow — see DESIGN.md). Rebuilding, but with two architecture changes decided during the 2026-07-01 session, both confirmed for this rebuild rather than deferred further:
+
+1. **Split into one VPC per purpose, not one per environment.** A single "dev" VPC sharing DevOps + App cluster was fine for one environment, but doesn't scale once staging/prod show up. Target: one shared DevOps VPC (hub) + one VPC per app environment (dev app VPC now; staging/prod VPCs out of scope for now, just needs to support the pattern later). **Breaking change**: today's cross-cluster SG rules reference the peer's security-group ID directly (Fluent Bit→Loki, Prometheus→app metrics, ArgoCD→App cluster API) — that only works within one VPC. Splitting means those rules become CIDR-block-based, the VPCs need peering (Transit Gateway can wait until a 3rd/4th VPC makes a peering mesh unwieldy), and `modules/vpc/` likely needs a `purpose`/`role` variable since it'll be instantiated more than once per env with non-overlapping CIDRs. Each new VPC needs its own NAT instance (~$3/mo each).
+2. **Replace SSM-tunnel access with the Tailscale operator.** Manual `tunnel.sh`/`api-tunnel*.sh` juggling (one local port 6443, constant target-switching, port-forwards dying on pod restarts) was a real practical pain. Tailscale's free tier (up to 3 users/100 devices) covers this project at $0/mo — chosen over ALB (~$20/mo + domain, and a separate decision since it also fixes Woodpecker webhooks, which Tailscale alone doesn't). Decide whether the SSM scripts stay as a fallback or get removed once Tailscale works.
+
 ## Future Enhancements (Deferred by Design)
 
 | Enhancement | Why deferred | Approach when revisited |
