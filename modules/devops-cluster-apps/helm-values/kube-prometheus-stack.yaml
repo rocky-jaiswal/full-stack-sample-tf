@@ -16,6 +16,20 @@ prometheus:
           resources:
             requests:
               storage: 20Gi
+    additionalScrapeConfigs:
+      - job_name: hello-fastify
+        static_configs:
+          - targets: ["${app_cluster_server_ip}:31001"]
+        metrics_path: /metrics
+        relabel_configs:
+          - target_label: cluster
+            replacement: app-dev
+      - job_name: app-cluster-node-exporter
+        static_configs:
+          - targets: ["${app_cluster_server_ip}:31090"]
+        relabel_configs:
+          - target_label: cluster
+            replacement: app-dev
 
 alertmanager:
   enabled: false

@@ -1,0 +1,11 @@
+# Only overriding `outputs` — inputs/filters keep the chart defaults
+# (tail /var/log/containers, kubernetes metadata enrichment).
+config:
+  outputs: |
+    [OUTPUT]
+        Name        loki
+        Match       kube.*
+        Host        ${loki_host}
+        Port        ${loki_port}
+        Labels      job=fluent-bit, cluster=app-dev
+        Line_Format json

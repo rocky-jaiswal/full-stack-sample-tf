@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Fetches the K3s kubeconfig from the DevOps cluster server node via SSM.
+# Fetches the K3s kubeconfig from the App cluster server node via SSM.
 # Run once after the cluster is provisioned (or after cluster recreation).
 #
-# Usage: ./scripts/get-kubeconfig.sh [dev|prod]
+# Usage: ./scripts/get-kubeconfig-app.sh [dev|prod]
 
 set -euo pipefail
 
 ENV=${1:-dev}
 REGION="eu-central-1"
 PROFILE="tf-dev"
-KUBECONFIG_PATH="$HOME/.kube/devops-cluster-$ENV"
+KUBECONFIG_PATH="$HOME/.kube/app-cluster-$ENV"
 
-echo "==> Finding DevOps cluster server node ($ENV)..."
+echo "==> Finding App cluster server node ($ENV)..."
 SERVER_ID=$(aws ec2 describe-instances \
   --filters \
     "Name=tag:Role,Values=k3s-server" \
-    "Name=tag:Cluster,Values=devops" \
+    "Name=tag:Cluster,Values=app" \
     "Name=tag:Environment,Values=$ENV" \
     "Name=instance-state-name,Values=running" \
   --query "Reservations[0].Instances[0].InstanceId" \
@@ -52,12 +52,4 @@ chmod 600 "$KUBECONFIG_PATH"
 
 echo "==> Done. Kubeconfig saved to $KUBECONFIG_PATH"
 echo ""
-echo "Next steps:"
-echo "  1. ./scripts/api-tunnel.sh $ENV     # terminal 1 — K3s API tunnel"
-echo "  2. In terminal 2:"
-echo "     TF_VAR_woodpecker_github_client_id=xxx \\"
-echo "     TF_VAR_woodpecker_github_client_secret=yyy \\"
-echo "     TF_VAR_woodpecker_agent_secret=\$(openssl rand -hex 32) \\"
-echo "     AWS_PROFILE=tf-dev KUBECONFIG=$KUBECONFIG_PATH \\"
-echo "     terragrunt apply"
-echo "  3. ./scripts/tunnel.sh $ENV          # access UIs"
+echo "Next: ./scripts/api-tunnel-app.sh $ENV   # K3s API tunnel, then KUBECONFIG=$KUBECONFIG_PATH kubectl ..."

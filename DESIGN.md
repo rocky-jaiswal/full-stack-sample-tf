@@ -16,7 +16,7 @@ The living record of decisions made on this project, why, and what's still open.
 | App packaging | Helm charts | Standard K8s packaging — ArgoCD deploys Helm charts from Git |
 | Logs | Loki (DevOps cluster) + Fluent Bit DaemonSet on App cluster | Free, OSS, runs on your cluster — no $50+/mo managed OpenSearch |
 | Metrics | Prometheus + Grafana (DevOps cluster) | Free, OSS, scrapes App cluster remotely |
-| Log + metrics retention | 90 days (Loki + Prometheus) | Configurable via Helm values; long enough to debug, bounded storage cost |
+| Log + metrics retention | 7 days (Prometheus `retention: 7d`; Loki uses filesystem storage, no explicit retention set) | Configurable via Helm values; short for now to bound storage cost on small dev volumes — revisit before this becomes a real debugging tool |
 | Encryption | KMS CMK per env | One key for all services, ~$1/mo |
 | Storage | S3 (KMS-encrypted, versioned) | Locked down, HTTPS-only |
 | Cache | ElastiCache Redis (managed) | Cache + sessions, isolated subnet, no ops burden |
@@ -34,6 +34,12 @@ The living record of decisions made on this project, why, and what's still open.
 | Grafana auth | GitHub OAuth (built-in) | Same pattern; restrict to your GitHub org/users |
 | IaC | Terraform/Terragrunt (OpenTofu) | Multi-module, multi-env, DRY |
 | EC2 node scaling | Manual instance count for v1 | Pod-level HPA covers most elasticity; ASG + Cluster Autoscaler deferred — see [Future Enhancements](PLAN.md#future-enhancements-deferred-by-design) |
+| Multi-cluster node tagging | `Cluster=devops` / `Cluster=app` tag on every K3s node, alongside `Environment` | Both clusters share `Environment=dev`; SSM lookup scripts (`get-kubeconfig*.sh`, `api-tunnel*.sh`, `tunnel.sh`) need `Cluster` too or they resolve to an arbitrary node from either cluster |
+| AMI pinning on long-lived nodes | `lifecycle { ignore_changes = [ami] }` on every `aws_instance` sourced from a `most_recent = true` AMI data source (NAT, DevOps cluster, App cluster) | Without this, any `plan`/`apply` after AWS publishes a newer AL2023 AMI silently destroys and recreates the node. Bump the AMI deliberately (taint + apply) when you actually want to upgrade it |
+| ArgoCD → App cluster auth | Client cert/key from the App cluster's own kubeconfig (`tlsClientConfig.caData/certData/keyData`), not the K3s node-token | The node-token authenticates node *joins* to the cluster, not API access — it can't be used as a bearer token. The admin client cert from `/etc/rancher/k3s/k3s.yaml` is a real Kubernetes credential and was already being fetched anyway |
+| CI Kaniko image | `woodpeckerci/plugin-kaniko`, not raw `gcr.io/kaniko-project/executor` | The raw image has no shell and doesn't read `PLUGIN_*` env vars, so Woodpecker's `settings:` block silently does nothing against it. The plugin wrapper translates `settings` → kaniko CLI flags; verified against its `plugin.sh` that `registry` and `repo` are concatenated as `${registry}/${repo}:${tag}`, so they must be set separately, not combined |
+| Cross-cluster NodePort discovery | Terraform `data "kubernetes_service_v1"` reads back the NodePort Kubernetes assigns, rather than pinning one in Helm values | The Loki chart's `singleBinary.service` block supports `type` but not a fixed `nodePort` field — only some charts (e.g. prometheus-node-exporter) expose that. Reading it back via a data source keeps everything wired through Terraform outputs instead of a manual "check kubectl, hardcode the port" step |
+| ECR pull auth (App cluster) | Kubernetes CronJob refreshes `ecr-pull-secret` every 6h using the node's own instance-profile credentials | This K3s isn't the EKS-optimized AMI, so containerd has no built-in ECR credential helper (unlike EKS worker nodes). Chose a CronJob over the kubelet image-credential-provider plugin — no node/kubelet changes needed, fully declarative in `modules/app-cluster-apps/ecr-refresh.tf`. RBAC scoped to `get/update/patch` on just that one Secret name; Terraform creates the Secret once with `lifecycle.ignore_changes = [data]` so it doesn't fight the CronJob over the actual token |
 
 ---
 
@@ -371,25 +377,50 @@ Your laptop
 
 ## 7. Observability
 
+**As built** (2026-07-01) — both clusters are in the same VPC/subnet, so cross-cluster traffic is plain TCP over private IPs, no VPN:
+
 ```
-App Cluster pods
-   │
-   ├── Fluent Bit (DaemonSet)  ──────→  Loki        ─→ Grafana
-   │     ships stdout/stderr logs                         (DevOps cluster)
-   │
-   └── OTel collector (DaemonSet) ──→  Prometheus   ─→ Grafana
-         ships metrics + traces
+App Cluster                                    DevOps Cluster
+───────────                                    ──────────────
+Fluent Bit (DaemonSet)  ──NodePort:30305──►   Loki (singleBinary)  ─► Grafana
+node-exporter (DaemonSet, NodePort:31090) ◄──scrape── Prometheus         ─► Grafana
+hello-fastify (NodePort:31001)            ◄──scrape──      (additionalScrapeConfigs)
 ```
 
 | Tool | Role |
 |------|------|
-| **Fluent Bit** | Tiny log shipper (~50MB/node), reads pod stdout, forwards to Loki |
-| **OTel collector** | Collects metrics + traces from apps, forwards to Prometheus |
-| **Loki** | Log storage + query engine (like Prometheus but for log lines) |
-| **Prometheus** | Time-series metrics database, also scrapes K3s node metrics |
+| **Fluent Bit** | DaemonSet on the App cluster (`modules/app-cluster-apps/`). Only `config.outputs` is overridden (native `loki` output plugin) — inputs/filters keep the chart defaults (tail `/var/log/containers`, Kubernetes metadata enrichment) |
+| **node-exporter** | DaemonSet on the App cluster, `service.type=NodePort` with a fixed `service.nodePort` (the chart supports this field explicitly) |
+| **Loki** | `deploymentMode: SingleBinary` on the DevOps cluster. Service is NodePort (`singleBinary.service.type`) so Fluent Bit can reach it cross-cluster — but the chart doesn't support pinning the nodePort, so Terraform reads back whatever Kubernetes assigned via `data "kubernetes_service_v1"` and passes it down as `loki_node_port` |
+| **Prometheus** | `kube-prometheus-stack` on the DevOps cluster. No separate Prometheus/OTel collector on the App cluster — `additionalScrapeConfigs` with static targets (`<app-server-ip>:<nodePort>`) scrapes hello-fastify and node-exporter directly |
 | **Grafana** | Single UI: dashboards over both Prometheus and Loki |
 
 Loki requires `loki.schemaConfig` set explicitly in Helm values (a v3+ chart requirement).
+
+**Security groups**: NodePorts are cross-cluster, so both cluster security groups needed a rule opening the full NodePort range (30000-32767) to the other cluster's SG — one direction each way (`modules/app-cluster` for App→DevOps port 6443 + the reverse NodePort range; `modules/devops-cluster-apps` for the App-cluster-SG→DevOps-cluster-SG NodePort rule, since that module already depends on both clusters and adding it to either cluster module directly would create a circular Terragrunt dependency).
+
+---
+
+## 8. hello-fastify on the App Cluster
+
+**As built** (2026-07-01). Chart lives in the **hello-fastify repo**, not this one:
+
+```
+helm/hello-fastify/
+  Chart.yaml
+  values.yaml          # image, resources, NodePort service (dual-purpose: in-cluster ClusterIP + cross-cluster Prometheus scrape target)
+  values-dev.yaml      # image.tag — bumped by hand after a CI build; the automated git-push-back step doesn't work (see below)
+  templates/
+    deployment.yaml    # prometheus.io/scrape annotations, imagePullSecrets, liveness/readiness on /v1/health
+    service.yaml
+    _helpers.tpl
+```
+
+**ArgoCD registration** (`modules/devops-cluster-apps/main.tf`): a `kubernetes_secret` labeled `argocd.argoproj.io/secret-type: cluster` (auth via cert/key, see Decisions Made above) plus a `kubernetes_manifest` for the `Application` resource — both created via Terraform against the DevOps cluster's own Kubernetes provider, not `kubectl apply`, so they're tracked in state like everything else. `syncPolicy.automated` with `selfHeal: true` means any manual `kubectl edit` on the App cluster gets reverted on ArgoCD's next reconcile.
+
+**CI** (`.woodpecker.yml` in the app repo): lint/build/test steps use the actual `npm` scripts (`lint`, `build` — `build` runs `tsc`, which is also the type-check, so there's no separate `typecheck` script); `test` runs with `--passWithNoTests` since no tests exist yet. Build-and-push uses `woodpeckerci/plugin-kaniko` (see Decisions Made). **Confirmed running for real** (2026-07-01) — lint, test, and the Kaniko build+push to ECR all pass through actual Woodpecker pipeline runs on the DevOps cluster; `hello-fastify` is deployed from a real CI-built image (`80c7d97` tag), not a manual `docker buildx` push. Trigger is manual (webhook points at a dead URL, see PLAN.md Known Gaps) and the final "commit the new tag back to Git" step doesn't work (the `github_token` secret never reaches that step's environment, cause unresolved) — `values-dev.yaml`'s `image.tag` is bumped by hand after a build. See PLAN.md Known Gaps.
+
+**ECR pull auth**: fixed properly (2026-07-01) — see Decisions Made table. A CronJob in `modules/app-cluster-apps/` refreshes `ecr-pull-secret` every 6h; the chart's `imagePullSecrets` references it.
 
 ---
 

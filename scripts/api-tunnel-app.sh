@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Opens an SSM port-forward to the K3s API (port 6443).
-# Keep this running in a separate terminal while running 'terragrunt apply'
-# on devops-cluster-apps (or any kubectl/helm commands against the cluster).
+# Opens an SSM port-forward to the App cluster's K3s API (port 6443).
+# Keep this running in a separate terminal for kubectl/helm commands against
+# the App cluster, or while registering it with ArgoCD.
 #
-# Usage: ./scripts/api-tunnel.sh [dev|prod]
+# Usage: ./scripts/api-tunnel-app.sh [dev|prod]
 
 set -euo pipefail
 
@@ -11,11 +11,11 @@ ENV=${1:-dev}
 REGION="eu-central-1"
 PROFILE="tf-dev"
 
-echo "==> Finding DevOps cluster server node ($ENV)..."
+echo "==> Finding App cluster server node ($ENV)..."
 SERVER_ID=$(aws ec2 describe-instances \
   --filters \
     "Name=tag:Role,Values=k3s-server" \
-    "Name=tag:Cluster,Values=devops" \
+    "Name=tag:Cluster,Values=app" \
     "Name=tag:Environment,Values=$ENV" \
     "Name=instance-state-name,Values=running" \
   --query "Reservations[0].Instances[0].InstanceId" \
@@ -24,7 +24,6 @@ SERVER_ID=$(aws ec2 describe-instances \
   --region "$REGION")
 
 echo "    K3s API available at localhost:6443 via $SERVER_ID"
-echo "    Keep this running while applying devops-cluster-apps"
 echo "    Ctrl+C to stop"
 echo ""
 

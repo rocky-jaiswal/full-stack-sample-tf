@@ -171,6 +171,13 @@ resource "aws_instance" "nat" {
   }
 
   depends_on = [aws_internet_gateway.main]
+
+  # AMI floats to "most_recent" on every plan — pin the instance to whatever
+  # AMI it actually launched with so a new AL2023 release doesn't force a
+  # silent replace. Bump the AMI deliberately (taint + apply) when needed.
+  lifecycle {
+    ignore_changes = [ami]
+  }
 }
 
 # -----------------------------------------------------------------------------

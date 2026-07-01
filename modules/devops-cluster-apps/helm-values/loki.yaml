@@ -18,6 +18,8 @@ loki:
 
 singleBinary:
   replicas: 1
+  service:
+    type: NodePort
 
 # Disable distributed components — single binary is sufficient for dev
 read:

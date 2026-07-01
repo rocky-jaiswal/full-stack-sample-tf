@@ -227,3 +227,32 @@ Opens the K3s API tunnel and `kubectl port-forward` for all three services in on
 | `http://localhost:8082` Grafana | admin / admin |
 
 > **Future:** Tailscale operator on the DevOps cluster would give always-on access without running `tunnel.sh` each session. Deferred until a custom domain is available for the Woodpecker webhook URL.
+
+---
+
+## Part 6 — Bootstrap the App cluster
+
+Provisions the App cluster (`modules/app-cluster/`) — 2 x t4g.medium K3s nodes where application workloads run, separate from the DevOps cluster.
+
+### 1. Apply
+
+```bash
+cd environments/dev/app-cluster
+AWS_PROFILE=tf-dev terragrunt apply
+```
+
+Takes ~1-2 minutes for both nodes to boot and join K3s.
+
+### 2. Verify
+
+```bash
+./scripts/get-kubeconfig-app.sh dev
+# saves to ~/.kube/app-cluster-dev
+
+./scripts/api-tunnel-app.sh dev   # separate terminal, keep running
+# then: KUBECONFIG=~/.kube/app-cluster-dev kubectl get nodes
+```
+
+Both nodes should show `Ready`.
+
+> **Note:** the App cluster isn't registered with ArgoCD yet — that happens as part of Step 7 (hello-fastify) in [PLAN.md](PLAN.md), since it requires a `Secret` resource in `modules/devops-cluster-apps/`.

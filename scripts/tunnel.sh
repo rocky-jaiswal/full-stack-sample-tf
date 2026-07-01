@@ -20,6 +20,7 @@ echo "==> Finding DevOps cluster server node ($ENV)..."
 SERVER_ID=$(aws ec2 describe-instances \
   --filters \
     "Name=tag:Role,Values=k3s-server" \
+    "Name=tag:Cluster,Values=devops" \
     "Name=tag:Environment,Values=$ENV" \
     "Name=instance-state-name,Values=running" \
   --query "Reservations[0].Instances[0].InstanceId" \

@@ -22,9 +22,9 @@ resource "random_password" "k3s_token" {
 # Security Group
 # -----------------------------------------------------------------------------
 
-resource "aws_security_group" "devops_cluster" {
-  name        = "devops-cluster-${var.environment}"
-  description = "DevOps cluster K3s nodes"
+resource "aws_security_group" "app_cluster" {
+  name        = "app-cluster-${var.environment}"
+  description = "App cluster K3s nodes"
   vpc_id      = var.vpc_id
 
   ingress {
@@ -33,6 +33,22 @@ resource "aws_security_group" "devops_cluster" {
     to_port     = 0
     protocol    = "-1"
     self        = true
+  }
+
+  ingress {
+    description     = "K3s API - ArgoCD on the DevOps cluster deploys here"
+    from_port       = 6443
+    to_port         = 6443
+    protocol        = "tcp"
+    security_groups = [var.devops_cluster_sg_id]
+  }
+
+  ingress {
+    description     = "NodePort range - Prometheus on the DevOps cluster scrapes app + node-exporter metrics here"
+    from_port       = 30000
+    to_port         = 32767
+    protocol        = "tcp"
+    security_groups = [var.devops_cluster_sg_id]
   }
 
   egress {
@@ -44,22 +60,22 @@ resource "aws_security_group" "devops_cluster" {
   }
 
   tags = {
-    Name        = "devops-cluster-${var.environment}"
+    Name        = "app-cluster-${var.environment}"
     Environment = var.environment
     ManagedBy   = "terraform"
   }
 }
 
 # -----------------------------------------------------------------------------
-# K3s server node (AZ-a) — runs control plane + Woodpecker + ArgoCD + PLG
+# K3s server node (AZ-a) — control plane + app workloads
 # -----------------------------------------------------------------------------
 
 resource "aws_instance" "server" {
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.instance_type
   subnet_id              = var.private_subnet_ids[0]
-  iam_instance_profile   = aws_iam_instance_profile.devops_cluster.name
-  vpc_security_group_ids = [aws_security_group.devops_cluster.id]
+  iam_instance_profile   = aws_iam_instance_profile.app_cluster.name
+  vpc_security_group_ids = [aws_security_group.app_cluster.id]
 
   root_block_device {
     volume_size = 50
@@ -73,11 +89,11 @@ resource "aws_instance" "server" {
   })
 
   tags = {
-    Name        = "devops-cluster-server-${var.environment}"
+    Name        = "app-cluster-server-${var.environment}"
     Environment = var.environment
     ManagedBy   = "terraform"
     Role        = "k3s-server"
-    Cluster     = "devops"
+    Cluster     = "app"
   }
 
   # AMI floats to "most_recent" on every plan — pin the node to whatever
@@ -96,8 +112,8 @@ resource "aws_instance" "agent" {
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.instance_type
   subnet_id              = var.private_subnet_ids[1]
-  iam_instance_profile   = aws_iam_instance_profile.devops_cluster.name
-  vpc_security_group_ids = [aws_security_group.devops_cluster.id]
+  iam_instance_profile   = aws_iam_instance_profile.app_cluster.name
+  vpc_security_group_ids = [aws_security_group.app_cluster.id]
 
   root_block_device {
     volume_size = 50
@@ -114,11 +130,11 @@ resource "aws_instance" "agent" {
   depends_on = [aws_instance.server]
 
   tags = {
-    Name        = "devops-cluster-agent-${var.environment}"
+    Name        = "app-cluster-agent-${var.environment}"
     Environment = var.environment
     ManagedBy   = "terraform"
     Role        = "k3s-agent"
-    Cluster     = "devops"
+    Cluster     = "app"
   }
 
   lifecycle {
